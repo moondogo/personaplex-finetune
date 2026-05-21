@@ -1,0 +1,88 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# PersonaPlex Finetune 训练配置
+# ═══════════════════════════════════════════════════════════════════════════════
+# 基于 moshi-finetune，增加 PersonaPlex (arXiv:2602.06053) 功能：
+#   - Hybrid System Prompt（声音克隆 + 角色控制）
+#   - text/audio loss 权重平衡（修复原版微调后的延迟问题）
+#
+# 使用方式：
+#   uv run torchrun --nproc-per-node 8 -m train example/personaplex_finetune.yaml
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── 数据 ──────────────────────────────────────────────────────────────
+data:
+  eval_data: ''           # 可选的评估集
+  shuffle: true
+  train_data: ''          # 填入你的训练 jsonl 文件路径
+
+# ── 模型路径 ──────────────────────────────────────────────────────────
+# PersonaPlex 官方权重 (dep_q=16, n_q=16)
+moshi_paths:
+  hf_repo_id: "nvidia/personaplex-7b-v1"
+
+# ── 微调方式 ──────────────────────────────────────────────────────────
+full_finetuning: false     # true=完整微调, false=LoRA
+lora:
+  enable: true
+  rank: 128
+  scaling: 2.
+  ft_embed: false
+
+# ── PersonaPlex: Loss 权重平衡 ────────────────────────────────────────
+# 关键修复：原版 moshi-finetune 中 first_codebook_weight_multiplier=100
+# 使 audio loss 在数值上是 text loss 的 40-100 倍。
+# 此处三项配合使用：
+#   1. 降低 first_codebook_weight_multiplier: 100 → 10
+#   2. 提升 text_padding_weight: 0.5 → 1.0 (不给 PAD/EPAD 降权)
+#   3. 新增 text_loss_weight: 给 text loss 一个补偿乘数
+#
+# 总 loss 公式：
+#   mb_loss = text_loss * text_loss_weight + audio_loss
+# 建议 text_loss_weight 10-20，可根据训练曲线调整
+first_codebook_weight_multiplier: 10.
+text_padding_weight: 1.0
+text_loss_weight: 20.
+
+# ── PersonaPlex: Hybrid System Prompt 配置 ────────────────────────────
+# 参考 PersonaPlex paper Section 3.1
+system_prompt:
+  # 启用 system prompt 前缀
+  enable: true
+  # 每段静音缓冲时长（秒），默认 0.5s ≈ 6 frames at 12.5Hz
+  silence_duration_sec: 0.5
+  # 默认文本角色描述（如果 jsonl 未指定 text_prompt）
+  default_text_prompt: "<system>You are a helpful assistant.</system>"
+  # voice prompt 音频文件的根目录
+  voice_prompt_dir: ""
+
+# ── 优化器 ────────────────────────────────────────────────────────────
+# PersonaPlex paper: DT lr=4e-6, TT lr=2e-6, Adam+余弦退火
+# 此处使用统一 lr=2e-6（OneCycleLR）
+duration_sec: 164         # 163.84s = 2048 tokens at 12.5Hz (paper 推荐)
+batch_size: 32            # paper: 32
+max_steps: 24576          # paper: 24,576 steps
+gradient_checkpointing: true
+optim:
+  lr: 2e-6
+  weight_decay: 0.1
+  pct_start: 0.05
+
+# ── 其他 ──────────────────────────────────────────────────────────────
+seed: 0
+log_freq: 1
+eval_freq: 100
+do_eval: false
+do_ckpt: true
+ckpt_freq: 100
+
+save_adapters: true       # 仅保存 LoRA adapter（推荐）
+# full_finetuning=true 时需设为 false
+
+run_dir: ""               # 填入运行目录路径
+
+# ── 可选：Weights & Biases 日志 ───────────────────────────────────────
+# wandb:
+#   project: ""
+#   run_name: ""
+#   key: ""
+#   offline: false
