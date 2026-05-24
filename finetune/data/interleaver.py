@@ -23,7 +23,7 @@ import numpy as np
 import sentencepiece
 import sphn
 import torch
-from moshi.conditioners import ConditionAttributes
+from typing import Any
 
 Alignment = tuple[str, tuple[float, float], str]
 TokenizedAlignment = tuple[list[int], tuple[float, float], str]
@@ -56,7 +56,6 @@ ZERO_TOKEN = -1
 @dataclass
 class Sample:
     codes: torch.Tensor
-    condition_attributes: ConditionAttributes | None = None
     # ── PersonaPlex: system prompt 前缀帧数，用于 loss mask ──────────────
     # 如果此 sample 包含 system prompt 前缀，此值为前缀的总帧数。
     # 训练时此区域不回传 loss。None 表示无 system prompt。
@@ -66,7 +65,6 @@ class Sample:
 @dataclass
 class Batch:
     codes: torch.Tensor
-    condition_attributes: list[ConditionAttributes] | None = None
     # ── PersonaPlex: 每个 sample 的 system prompt 前缀帧数 [B] ──────────
     system_prompt_len: torch.Tensor | None = None
 
@@ -84,10 +82,7 @@ class Batch:
                 else:
                     lengths.append(pl.item() if isinstance(pl, torch.Tensor) else pl)
             sys_len = torch.tensor(lengths, dtype=torch.long)
-        if batch[0].condition_attributes is None:
-            return Batch(codes, system_prompt_len=sys_len)
-        return Batch(codes, [b.condition_attributes for b in batch],
-                     system_prompt_len=sys_len)
+        return Batch(codes, system_prompt_len=sys_len)
 
 
 def tokenize(
@@ -591,6 +586,5 @@ class InterleavedTokenizer:
 
             return Sample(
                 codes,
-                data.get("text_conditions", None),
                 system_prompt_len=sys_len_tensor,
             )

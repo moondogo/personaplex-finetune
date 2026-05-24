@@ -7,8 +7,10 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import fire
+import sentencepiece
 import torch.cuda
 import torch.distributed as dist
+from huggingface_hub import hf_hub_download
 from torch.optim import AdamW, lr_scheduler
 
 # from torch.profiler import ProfilerActivity, profile
@@ -125,32 +127,28 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
 
     # 4.1 Load function calling audio encoder and tokenizer
     main_logger_info("Loading Mimi and Moshi...")
-    checkpoint_info = loaders.CheckpointInfo.from_hf_repo(
-        hf_repo=args.moshi_paths.hf_repo_id,
-        moshi_weights=args.moshi_paths.moshi_path,
-        mimi_weights=args.moshi_paths.mimi_path,
-        tokenizer=args.moshi_paths.tokenizer_path,
-        config_path=args.moshi_paths.config_path,
-    )
+    hf_repo = args.moshi_paths.hf_repo_id
 
-    lm_config = (
-        loaders._lm_kwargs
-        if checkpoint_info.raw_config is None
-        else checkpoint_info.raw_config
-    )
-    lm_config["lora"] = args.lora.enable
-    lm_config["lora_rank"] = args.lora.rank
-    lm_config["lora_scaling"] = args.lora.scaling
-
-    mimi = checkpoint_info.get_mimi(device="cuda")
+    if args.moshi_paths.mimi_path is None:
+        args.moshi_paths.mimi_path = hf_hub_download(hf_repo, loaders.MIMI_NAME)
+    mimi = loaders.get_mimi(args.moshi_paths.mimi_path, device="cuda")
     mimi.eval()
     for p in mimi.parameters():
         p.requires_grad = False
 
-    # 4.2 Load and shard model, prepare interleaver for audio/text tokens.
-    model = get_fsdp_model(args, checkpoint_info)
+    if args.moshi_paths.moshi_path is None:
+        args.moshi_paths.moshi_path = hf_hub_download(hf_repo, loaders.MOSHI_NAME)
 
-    spm = checkpoint_info.get_text_tokenizer()
+    if args.moshi_paths.tokenizer_path is None:
+        args.moshi_paths.tokenizer_path = hf_hub_download(hf_repo, loaders.TEXT_TOKENIZER_NAME)
+
+    lm_config = dict(loaders._lm_kwargs)
+    lm_config["dep_q"] = 16
+
+    # 4.2 Load and shard model, prepare interleaver for audio/text tokens.
+    model = get_fsdp_model(args)
+
+    spm = sentencepiece.SentencePieceProcessor(str(args.moshi_paths.tokenizer_path))
 
     # ── PersonaPlex: 传入 system_prompt 配置 ──────────────────────────
     interleaver = Interleaver(
@@ -250,14 +248,7 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
             batch = next(data_loader)
             codes = batch.codes
 
-            condition_tensors = None
-            if batch.condition_attributes is not None:
-                condition_tensors = model.condition_provider.prepare(
-                    batch.condition_attributes
-                )
-
-            # forward / backward
-            output = model(codes=codes, condition_tensors=condition_tensors)
+            output = model.forward_train(codes)
 
             # ── PersonaPlex: 构建 system prompt 区域的 loss mask ────────
             # System prompt 区域不回传 loss，与 PersonaPlex paper Section 3.1 一致：
@@ -376,7 +367,6 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
             (args.ckpt_freq > 0 and state.step % args.ckpt_freq == 0) or is_last_step
         ):
             checkpointer.save_checkpoint(
-                save_only_lora=not args.full_finetuning and args.save_adapters,
                 dtype=param_dtype,
             )
 
