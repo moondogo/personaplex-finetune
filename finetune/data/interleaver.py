@@ -508,7 +508,8 @@ class InterleavedTokenizer:
         """
         with torch.no_grad():
             audio_tensor = torch.Tensor(wav).cuda()
-            audio_tokens = self.mimi.encode(audio_tensor[:, None])
+            agent_channel = audio_tensor[0:1, :]
+            audio_tokens = self.mimi.encode(agent_channel[:, None])
             audio_tokens = audio_tokens[..., : self.num_audio_frames]
             this_num_audio_frames = audio_tokens.shape[-1]
             audio_tokens = torch.nn.functional.pad(

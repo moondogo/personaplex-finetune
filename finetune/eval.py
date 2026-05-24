@@ -38,13 +38,7 @@ def evaluate(
             break
         with torch.no_grad():
             codes = batch.codes
-            condition_tensors = None
-            if batch.condition_attributes is not None:
-                condition_tensors = model.condition_provider.prepare(
-                    batch.condition_attributes
-                )
-
-            output = model(codes=codes, condition_tensors=condition_tensors)
+            output = model.forward_train(codes)
             text_loss += compute_loss_with_mask(
                 output.text_logits,
                 codes[:, : model.audio_offset],
@@ -63,7 +57,7 @@ def evaluate(
                 mode="audio",
                 first_codebook_weight_multiplier=args.first_codebook_weight_multiplier,
             )
-    eval_loss = text_loss + audio_loss
+    eval_loss = text_loss * args.text_loss_weight + audio_loss
     all_num_samples = [torch.zeros_like(num_samples) for _ in range(get_world_size())]
 
     torch.distributed.all_gather(all_num_samples, num_samples)
