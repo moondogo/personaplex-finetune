@@ -31,6 +31,14 @@ class _TrainWrapper(torch.nn.Module):
     def forward(self, codes: torch.Tensor):
         return self.model.forward_train(codes)
 
+    def __getattr__(self, name: str):
+        if name == 'model' or name in self._parameters:
+            return super().__getattr__(name)
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model, name)
+
 
 def main_logger_info(message: str) -> None:
     if get_rank() == 0:

@@ -95,7 +95,7 @@ class Checkpointer:
         )
         if get_world_size() > 1:
             with self.model.summon_full_params(
-                writeback=True, offload_to_cpu=offload_to_cpu
+                self.model, writeback=True, offload_to_cpu=offload_to_cpu
             ):
                 states = {k: v.to(dtype=save_dtype)
                           for k, v in self.model.state_dict().items()}
