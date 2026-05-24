@@ -248,7 +248,7 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
             batch = next(data_loader)
             codes = batch.codes
 
-            output = model.forward_train(codes)
+            output = model(codes)
 
             # ── PersonaPlex: 构建 system prompt 区域的 loss mask ────────
             # System prompt 区域不回传 loss，与 PersonaPlex paper Section 3.1 一致：

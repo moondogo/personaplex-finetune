@@ -18,6 +18,20 @@ from .distributed import get_rank, get_world_size
 logger = logging.getLogger(__name__)
 
 
+class _TrainWrapper(torch.nn.Module):
+    """Thin wrapper so FSDP hooks intercept __call__ → forward() before
+    delegating to LMModel.forward_train(). Without this, calling
+    model.forward_train(codes) directly bypasses FSDP's all-gather,
+    exposing sharded (1-D) parameters to F.embedding."""
+
+    def __init__(self, model: LMModel):
+        super().__init__()
+        self.model = model
+
+    def forward(self, codes: torch.Tensor):
+        return self.model.forward_train(codes)
+
+
 def main_logger_info(message: str) -> None:
     if get_rank() == 0:
         logger.info(message)
@@ -116,15 +130,17 @@ def get_fsdp_model(
     for param in model.parameters():
         param.requires_grad = True
 
+    train_model = _TrainWrapper(model)
+
     if get_world_size() == 1:
-        return model.cuda()
+        return train_model.cuda()
 
     auto_wrap_policy = get_fsdp_policy()
 
     main_logger_info(f"Sharding model over {get_world_size()} GPUs ...")
 
     wrapped_model = FullyShardedDataParallel(
-        model,
+        train_model,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         auto_wrap_policy=auto_wrap_policy,
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,

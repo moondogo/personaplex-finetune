@@ -38,7 +38,7 @@ def evaluate(
             break
         with torch.no_grad():
             codes = batch.codes
-            output = model.forward_train(codes)
+            output = model(codes)
             text_loss += compute_loss_with_mask(
                 output.text_logits,
                 codes[:, : model.audio_offset],
