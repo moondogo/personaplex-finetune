@@ -21,12 +21,7 @@ moshi_paths:
   hf_repo_id: "nvidia/personaplex-7b-v1"
 
 # ── 微调方式 ──────────────────────────────────────────────────────────
-full_finetuning: false     # true=完整微调, false=LoRA
-lora:
-  enable: true
-  rank: 128
-  scaling: 2.
-  ft_embed: false
+full_finetuning: true      # PersonaPlex-Finetune 仅支持完整微调
 
 # ── PersonaPlex: Loss 权重平衡 ────────────────────────────────────────
 # 关键修复：原版 moshi-finetune 中 first_codebook_weight_multiplier=100
@@ -75,8 +70,7 @@ do_eval: false
 do_ckpt: true
 ckpt_freq: 100
 
-save_adapters: true       # 仅保存 LoRA adapter（推荐）
-# full_finetuning=true 时需设为 false
+save_adapters: false      # 完整微调时必须设为 false
 
 run_dir: ""               # 填入运行目录路径
 

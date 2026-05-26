@@ -1,32 +1,62 @@
-# Moshi-Finetune
+# PersonaPlex-Finetune
 
-<a target="_blank" href="https://colab.research.google.com/github//kyutai-labs/moshi-finetune/blob/main/tutorials/moshi_finetune.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a>
+**PersonaPlex-Finetune** provides an easy way to fine-tune
+[PersonaPlex](https://arxiv.org/abs/2602.06053) models — full-duplex spoken
+dialogue models with zero-shot voice cloning and persona control, built on top
+of [Moshi](https://github.com/kyutai-labs/moshi). This guide walks you through
+installation, model downloading, dataset preparation, and training. By
+following these steps, you'll be able to fine-tune
+[PersonaPlex weights](https://huggingface.co/nvidia/personaplex-7b-v1) on your
+own conversational data with custom voices and role descriptions.
+
+PersonaPlex extends Moshi with a **Hybrid System Prompt**: a voice prompt
+segment (short speech sample on the agent audio channel) concatenated with a
+text prompt segment (role description on the agent text channel). During the
+prompt, a 440 Hz sine wave replaces user audio. This enables zero-shot voice
+cloning and role-conditioned response generation.
+
+## Architecture
 
 <p align="center">
-  <img src="./images/moshi_finetune_logo.png" alt="Moshi interface" width="250px" style="margin-left: 20px;">
+  <img src="./images/personaplex_architecture_diagram.png" alt="PersonaPlex architecture" width="800px">
 </p>
 
-**Moshi-Finetune** provides an easy way to fine-tune [Moshi models](https://github.com/kyutai-labs/moshi)
-using **LoRA (Low-Rank Adaptation)** for lightweight and efficient training. This guide walks you through
-installation, model downloading, dataset preparation, training, and inference. By following these steps,
-you'll be able to: transform stereo audio files into your very own transcribed dataset, fine-tune
-[moshi weights](https://huggingface.co/kyutai/moshiko-pytorch-bf16) on real conversations, and—best of
-all—chat with your customized moshi model!
+PersonaPlex uses a **17-channel multi-stream** architecture:
 
-## 📥 Installation
+| Index | Stream | Description |
+|-------|--------|-------------|
+| 0 | Text | Agent text tokens (SentencePiece) |
+| 1–8 | Agent audio | 8 codebooks (1 semantic + 7 acoustic) for model output |
+| 9–16 | User audio | 8 codebooks for user speech (teacher-forcing context) |
 
-_You can also follow along interactively in our Colab, see link at the top._
+Key architectural properties:
+
+- **Inner Monologue**: Predicts time-aligned text tokens before audio tokens at each timestep, critical for linguistic quality.
+- **Acoustic delay**: Semantic and acoustic tokens are offset by 1 timestep to reduce inter-codebook dependencies.
+- **dep_q = 16**: The Depth Transformer generates all 16 audio codebooks (8 agent + 8 user), unlike Moshi's dep_q=8.
+- **No Classifier-Free Guidance**: PersonaPlex removes CFG entirely, using pure autoregressive generation.
+
+## Installation
 
 To get started, follow these steps:
 
-### 1️⃣ Clone this repository
+### 1. Clone this repository
+
 ```sh
-git clone git@github.com:kyutai-labs/moshi-finetune.git
+git clone git@github.com:moondogo/personaplex-finetune.git
 ```
 
-### 2️⃣ Install all required dependencies:
+### 2. Install all required dependencies
+
+> **Important**: This repository includes its own modified version of `moshi`
+> (the `moshi/` directory) with PersonaPlex-specific changes (`dep_q=16`,
+> removal of CFG, etc.). If a standard `moshi` package is installed in your
+> environment, uninstall it first to avoid conflicts:
+> ```sh
+> pip uninstall moshi
+> ```
+> The modified `moshi/` will be used automatically via `pip install -e .` or
+> `uv run`.
 
 We recommend using [`uv`](https://docs.astral.sh/uv/) to manage the environment.
 It's about 10x faster than `pip` and has a bunch of other benefits too.
@@ -36,79 +66,113 @@ This will automatically install the necessary dependencies based on `pyproject.t
 
 #### Installing without `uv`
 
-If you prefer working with `pip`, and handling the install manually, you will need at least Python 3.10. 
+If you prefer working with `pip`, and handling the install manually, you will need at least Python 3.10.
 We still advise using a virtual environment,
 which can be created using [Conda](https://www.anaconda.com/docs/getting-started/miniconda/install#quickstart-install-instructions)
-[virtualenv](https://virtualenv.pypa.io/en/latest/).
+or [virtualenv](https://virtualenv.pypa.io/en/latest/).
 Then, run:
 
 ```sh
-cd moshi-finetune
+cd personaplex-finetune
 pip install -e .
 ```
 
-## 📥 Model configuration
+## Model configuration
 
-The training setup is specified via a YAML configuration file. The example
+The training setup is specified via a YAML configuration file. Example
 configuration files are located in the `example` directory.
 
-We recommend fine-tuning one of the official moshi models. To achieve this, you
-can use the following section in your configuration file.
+Use the official PersonaPlex weights:
 
-```
+```yaml
 moshi_paths:
-   hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+   hf_repo_id: "nvidia/personaplex-7b-v1"
 ```
 
-## 📚 Prepare dataset
+The PersonaPlex config sets `dep_q=16` automatically. See
+`example/personaplex_finetune.yaml` for a complete training configuration.
 
-The pipeline expects a dataset of stereo audio files, the left channel is used
-for the audio generated by moshi, whereas the second channel is used for the
-user's input.
+## Prepare dataset
 
-The files contained in the dataset should be specified in a `.jsonl` file,
-where each line has the form
+The pipeline expects a **JSONL manifest** where each line describes one
+training segment. Each entry references a stereo WAV file plus optional
+PersonaPlex-specific fields for voice cloning and persona control.
+
+### JSONL format
+
+```jsonl
+{
+  "path": "data/conversations/conv_001.wav",
+  "duration": 164,
+  "voice_prompt": "data/voices/speaker_01.wav",
+  "text_prompt": "<system>You are a friendly bank teller.</system>"
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `path` | Yes | Stereo WAV file path. Left channel = agent, right channel = user. |
+| `duration` | Yes | Audio duration in seconds. |
+| `voice_prompt` | No | Path to a short speech sample (`.wav` or `.pt`) for voice cloning. Resolved relative to `system_prompt.voice_prompt_dir`. |
+| `text_prompt` | No | Role description text. If omitted, falls back to `system_prompt.default_text_prompt`. |
+
+### Stereo WAV files
+
+- **Left channel (channel 0)**: Agent audio — the model's target output.
+- **Right channel (channel 1)**: User audio — teacher-forcing context for the model.
+- Sample rate: 24000 Hz (determined by Mimi).
+
+### Alignment files (`.json`)
+
+Each WAV must have an associated `.json` file with word-level timestamps:
+
 ```json
-{"path": "relative/path/to/file.wav", "duration": <duration in seconds>}
+{
+  "alignments": [
+    ["hello",  [0.0, 0.5],  "SPEAKER_MAIN"],
+    ["world",  [0.5, 1.2],  "SPEAKER_MAIN"]
+  ]
+}
 ```
 
-Each audio file should have an associated `.json` file that contains
-the transcript with timestamps. These JSONs can be generated automatically, see below.
+Each alignment entry: `[word_text, (start_sec, end_sec), speaker_label]`.
 
-For example, the following would be a valid directory structure for a dataset:
+To generate alignment files for your own audio, use the `annotate.py` script:
+
+```sh
+python annotate.py data/train.jsonl
+```
+
+This transcribes each WAV using Whisper and outputs word-level timestamps as matching `.json` files alongside the WAVs.
+
+### Directory structure
 
 ```
 data/
-├── mycooldataset.jsonl
-└── data_stereo
-    ├── a.json
-    ├── a.wav
-    ├── b.json
-    ├── b.wav
-    ├── c.json
-    └── c.wav
+├── train.jsonl
+├── conversations/
+│   ├── conv_001.json
+│   ├── conv_001.wav
+│   ├── conv_002.json
+│   └── conv_002.wav
+└── voices/
+    ├── speaker_01.wav
+    └── speaker_02.wav
 ```
 
-where `mycooldataset.jsonl` contains:
+### Generating the JSONL manifest
 
-```jsonl
-{"path": "data_stereo/a.wav", "duration": 24.521950113378686}
-{"path": "data_stereo/b.wav", "duration": 18.317074829931972}
-{"path": "data_stereo/c.wav", "duration": 39.38641723356009}
-```
-
-The `.jsonl` file can be generated with the snippet below. This will include
-all the `.wav` files in a given directory.
+Use `sphn` to scan a directory and generate the manifest:
 
 ```python
-import sphn
 import json
 from pathlib import Path
+import sphn
 
-paths = [str(f) for f in Path("wav-dir").glob("*.wav")]
+paths = [str(f) for f in Path("data/conversations").glob("*.wav")]
 durations = sphn.durations(paths)
 
-with open("data.jsonl", "w") as fobj:
+with open("data/train.jsonl", "w") as fobj:
     for p, d in zip(paths, durations):
         if d is None:
             continue
@@ -116,156 +180,176 @@ with open("data.jsonl", "w") as fobj:
         fobj.write("\n")
 ```
 
-A sample dataset in this format can be found in the
-[kyutai/DailyTalkContiguous](https://huggingface.co/datasets/kyutai/DailyTalkContiguous)
-repository. This 14 GB dataset can be downloaded using the following snippet:
-```python
-from huggingface_hub import snapshot_download
+Add `voice_prompt` and `text_prompt` fields manually to relevant lines.
 
-local_dir = snapshot_download(
-    "kyutai/DailyTalkContiguous",
-    repo_type="dataset",
-    local_dir="./daily-talk-contiguous"
-)
+> **Note**: Long audio files are automatically chunked into
+> `duration_sec`-length segments during training. See
+> [docs/DATA_PIPELINE.md](docs/DATA_PIPELINE.md) for a complete description of the data
+> flow from disk to model input.
+
+## Start training
+
+PersonaPlex-Finetune uses **full fine-tuning**. Set `full_finetuning: true` in
+your configuration.
+
+### Recommended settings
+
+```yaml
+full_finetuning: true
+duration_sec: 164
+batch_size: 32
+max_steps: 24576
 ```
 
-If you want to annotate your own dataset and generate the `.json` transcripts for each
-audio file, you can use the `annotate.py` script:
+These match the PersonaPlex paper settings (2048 tokens at 12.5 Hz =
+163.84 s).
+
+### Run training
 
 ```sh
-python annotate.py {your jsonl file}
+uv run torchrun --nproc-per-node 8 --master_port $RANDOM -m train example/personaplex_finetune.yaml
 ```
 
-This script can also be run in a distributed manner with SLURM using e.g.
-`--shards 64 --partition 'your-partition'`.
+If you encounter **out-of-memory errors**, try reducing the `batch_size`. If
+the issue persists, you can lower the `duration_sec` parameter, but be aware
+that this may negatively impact inference quality, potentially causing the
+model to become silent more quickly.
 
-## 🏋️ Start training
+## Customizing training configuration
 
-Once your dataset is ready, start fine-tuning using the following steps.
+The example `example/personaplex_finetune.yaml` defines reasonable defaults,
+but you should customize these settings for your use case.
 
-#### 📌 Recommended settings for quick training:
-```
-lora:
-  enable: true
-  rank: 128
-  scaling: 2.
+### Key training parameters
 
-duration_sec: 100
-batch_size: 16
-max_steps: 2000
-```
-
-#### 📌 Run training on a single GPU:
-
-```sh
-torchrun --nproc-per-node 1 -m train example/moshi_7B.yaml
-```
-
-Note that you should still use `torchrun` even if you're only using a single GPU.
-
-#### 📌 Run training on multiple GPUs (8):
-
-```sh
-torchrun --nproc-per-node 8 --master_port $RANDOM -m train example/moshi_7B.yaml
-```
-
-#### 💡 Expected performance:
-
-Using the above hyperparameters:
-
-|  | Avg Tokens/sec   | Peak Allocated Memory   |
-|------|------|------|
-|   1×H100  | ≈12k| 39.6GB |
-|   8×H100  | ≈10.7k| 23.7GB |
-
-
-
-If you encounter **out-of-memory errors**, try reducing the `batch_size`. If the issue persists, you can lower the `duration_sec` parameter, but be aware that this may negatively impact the user experience during inference, potentially causing the model to become silent more quickly.
-
-## ⚙️ Customizing training configuration
-
-The example `moshi-finetune/example/moshi_7B.yaml` defines reasonable parameters for learning rate, weight decay, etc... but you are advised to
-customize these settings for your use case.
-
-
-### 🔧 Key training parameters
-| Parameter              | Description |
-|------------------------|-------------|
-| `moshi_paths`         | Defines all the paths: `.hf_repo_id` if the model is imported from Hugging Face Hub ( `.hf_repo_id` enables to change default settings), for more information take a look at [Moshi loading](https://github.com/kyutai-labs/moshi/blob/main/moshi/moshi/models/loaders.py). |
-| `run_dir`             | Directory where training checkpoints and logs are stored. |
-| `duration_sec`        | Maximum sequence length (in seconds) for training. |
-| `first_codebook_weight_multiplier` | The first codebook being the semantic token, we put more weight on it. | 
-| `text_padding_weight` | Most of the text stream is padding as audio is 12.5Hz with mimi but tokenizing text takes less space. Decrease the loss weight on paddings to avoid the model over-focussing on predicting paddings. | 
-| `gradient_checkpointing` | Whether to use gradient checkpointing per transformer layer to mitigate out of memory issues. |
-| `batch_size`         | Number of training examples per GPU. |
-| `max_steps`         | Total number of training steps. Defines how many iterations the training will run. **Total tokens processed = max_steps × num_gpus × batch_size × duration_seq × 9 (token per step) × 12.5 (step per second) **. |
-| `optim.lr`          | Learning rate. Recommended starting value: **2e-6**. |
+| Parameter | Description |
+|-----------|-------------|
+| `moshi_paths.hf_repo_id` | PersonaPlex weights on Hugging Face. Default: `nvidia/personaplex-7b-v1`. |
+| `run_dir` | Directory where training checkpoints and logs are stored. |
+| `full_finetuning` | Set to `true`. Only full fine-tuning is supported. |
+| `duration_sec` | Maximum sequence length (in seconds). Recommended: **164**. |
+| `batch_size` | Number of training examples per GPU. Recommended: **32**. |
+| `max_steps` | Total number of training steps. Recommended: **24576**. |
+| `gradient_checkpointing` | Whether to use gradient checkpointing per transformer layer to reduce memory. |
+| `optim.lr` | Learning rate. Recommended: **2e-6**. |
 | `optim.weight_decay` | Weight decay for regularization. Default: **0.1**. |
-| `optim.pct_start`   | Percentage of total training steps used for learning rate warm-up before decay. Equivalent to `pct_start` in PyTorch’s `OneCycleLR`. |
-| `lora.rank`         | Size of the **LoRA adapters**. Recommended **≤128** for efficiency. |
-| `lora.ft_embed`     | Whether to full-finetune embedding matrices while fine-tuning with LoRA all the other linear layers. | 
-| `seed`              | Random seed for initialization, data shuffling, and sampling (ensures reproducibility). |
-| `log_freq`          | Defines how often (in steps) training metrics are logged. |
-| `data.train_data`   | Path to the dataset used for training. |
-| `data.eval_data`    | (Optional) Path to evaluation dataset for cross-validation at `eval_freq` intervals. |
-| `data.shuffle`      | Whether to shuffle training samples (Recommended). |
-| `eval_freq`        | Number of steps between evaluations on the validation set. |
-| `no_eval`         | If `False`, enables periodic model evaluation during training. |
-| `ckpt_freq`       | Number of steps between saving model checkpoints. |
-| `full_finetuning` | Set to `True` for **full fine-tuning**, or `False` to use **LoRA** for adaptation. |
-| `save_adapters`  | If `True`, saves only **LoRA adapters** (works with [Moshi Inference](https://github.com/kyutai-labs/moshi)). If `False`, merges LoRA into the base model (requires sufficient CPU/GPU memory). |
-| `wandb.key`      | API key for **Weights & Biases (wandb)** logging (Optional). |
-| `wandb.project`  | Name of the **wandb project** where training logs will be stored. |
+| `optim.pct_start` | Percentage of total steps for learning rate warm-up. |
+| `seed` | Random seed for reproducibility. |
+| `log_freq` | How often (in steps) training metrics are logged. |
+| `data.train_data` | Path to the training JSONL manifest. |
+| `data.eval_data` | (Optional) Path to evaluation JSONL. |
+| `data.shuffle` | Whether to shuffle training samples. |
+| `eval_freq` | Steps between evaluations on the validation set. |
+| `do_eval` | If `true`, enables periodic model evaluation. |
+| `ckpt_freq` | Steps between saving model checkpoints. |
 
+### PersonaPlex-specific parameters
 
-<figure style="text-align: center;">
-  <img src="./images/train_curve_example.png" alt="Training curves" width="2000px" style="margin-left: 20px;">
-  <figcaption>Figure 1: Training curves over steps on dailytalk dataset using a maximal learning rate of 4e-6.</figcaption>
-</figure>
+#### Hybrid System Prompt
 
-## 🔮 Inference
+| Parameter | Description |
+|-----------|-------------|
+| `system_prompt.enable` | Set to `true` to prepend a system prompt before each training segment. |
+| `system_prompt.silence_duration_sec` | Duration (seconds) of silence buffers between prompt segments. Default: **0.5** (~6 frames). |
+| `system_prompt.default_text_prompt` | Default role description when JSONL entry has no `text_prompt` field. |
+| `system_prompt.voice_prompt_dir` | Root directory for voice prompt audio files referenced in JSONL. |
 
-#### 1️⃣ Install Moshi for inference
+#### Loss weight balancing
 
-Once your model is trained, you can use it in interactive mode using [moshi](https://github.com/kyutai-labs/moshi).
-The package should already be in your environment if you used the
-`requirements.txt` file. If not, you can install it using `pip install git+https://git@github.com/kyutai-labs/moshi.git#egg=moshi&subdirectory=moshi`.
+| Parameter | Description |
+|-----------|-------------|
+| `first_codebook_weight_multiplier` | Weight multiplier for the semantic (first) codebook. Default: **10** (reduced from Moshi's 100). |
+| `text_padding_weight` | Weight multiplier for PAD/EPAD tokens. Default: **1.0** (increased from Moshi's 0.5). |
+| `text_loss_weight` | Global multiplier for text loss to balance against audio loss. Default: **20**. |
 
-#### 2️⃣ Run inference using the fine-tuned model
+The total loss is computed as:
 
-Let's say a checkpoint was saved under `CHECKPOINT_DIR=$HOME/dailydialog_ft/checkpoints/checkpoint_000500`.
-
-If you trained using LORA, you can run the Moshi web app using:
-
-```sh
-python -m moshi.server \
-  --lora-weight=$CHECKPOINT_DIR/consolidated/lora.safetensors \
-  --config-path=$CHECKPOINT_DIR/consolidated/config.json
+```
+mb_loss = text_loss * text_loss_weight + audio_loss
 ```
 
-This will run the fine-tuned model by applying your LORA adapter on top of the base model's weights.
+These three parameters work together to balance text and audio gradients.
+The original Moshi defaults (`first_codebook_weight_multiplier=100`,
+`text_padding_weight=0.5`) caused audio loss to dominate text loss by 40-100x,
+leading to noticeable response latency after fine-tuning. The PersonaPlex
+settings ensure the model learns precise text switching timing (when to start
+speaking after the user finishes).
 
-Otherwise (if your ran full fine-tuning, or didn't checkpoint LORA only), you can run:
+### PersonaPlex training differences from Moshi
 
-```sh
-python -m moshi.server \
---moshi-weight=$CHECKPOINT_DIR/consolidated/consolidated.safetensors \
---config-path=$CHECKPOINT_DIR/consolidated/consolidated/config.json 
+PersonaPlex introduces several key differences in the training pipeline:
+
+**Hybrid System Prompt.** During training, a system prompt prefix is
+optionally prepended to each dialogue:
+
+```
+[Voice Prompt] → [Silence] → [Text Prompt] → [Silence] → [Dialogue]
 ```
 
-Here, `consolidated.safetensors` contains all of the new Moshi weights and doesn't reference any base model.
+Each segment allocates the three input channels as follows:
 
-## 📊 Monitoring with Weights & Biases (W&B)
+| Channel | Voice Prompt | Text Prompt | Silence |
+|---------|-------------|-------------|---------|
+| Text (ch 0) | PAD (3) | Role description tokens | PAD (3) |
+| Agent audio (ch 1–8) | Speaker's Mimi tokens | Silence tokens | Silence tokens |
+| User audio (ch 9–16) | 440 Hz sine wave tokens | 440 Hz sine wave tokens | 440 Hz sine wave tokens |
 
-Explicit support for [Weights and Biases](https://www.wandb.com/) are added to help you monitor and visualize your training runs. This integration allows you to log various metrics and track experiments easily.
+The loss is **masked** for system prompt tokens — gradients only flow through
+dialogue content, matching Section 3.1 of the PersonaPlex paper.
 
-To use Weights and Biases with `moshi-finetune`, install `wandb` using `pip install wandb` and fill the `wandb:` section
-of your YAML configuration, see `example/moshi_7B.yaml`.
+**Hardcoded Mimi tokens.** The silence and 440 Hz sine wave are pre-computed
+Mimi codebook tokens, stored in `finetune/data/interleaver.py`:
 
-Once the training starts, you can monitor the progress in real-time by visiting your wandb project dashboard. All metrics, including training loss, evaluation loss, learning rate, etc., will be logged and visualized.
+```python
+SILENCE_TOKENS = [948, 243, 1178, 546, 1736, 1030, 1978, 2008]   # 8 codebooks
+SINE_TOKENS    = [430, 1268, 381, 1611, 1095, 1495, 56, 472]     # 8 codebooks
+```
 
-For more details on how to use wandb, visit the [Weights and Biases documentation](https://docs.wandb.ai/).
+> These values are specific to the official PersonaPlex Mimi weights. If you
+> use different Mimi weights, you will need to re-encode a silence frame and a
+> 440 Hz sine wave with the target encoder and replace these constants.
 
-## Acknowledgments
+**17-channel teacher forcing.** The user audio channels (9–16) are filled
+with `ZERO_TOKEN (-1)` during training — the model sees them as context (via
+the Temporal Transformer) but does not predict them. The Depth Transformer
+only produces loss on the text channel (0) and agent audio channels (1–8).
 
-This project uses code from [mistral-finetune](https://github.com/mistralai/mistral-finetune) licensed under the Apache License 2.0.
+For a complete reference on the data pipeline, 17-channel layout, loss
+computation, and shape specifications, see
+[docs/DATA_PIPELINE.md](docs/DATA_PIPELINE.md).
+
+For a detailed comparison between Moshi and PersonaPlex architectures, see
+[docs/MOSHI_VS_PERSONAPLEX.md](docs/MOSHI_VS_PERSONAPLEX.md).
+
+## Checkpoint compatibility
+
+> **Note on checkpoint keys**: Due to architectural differences between
+> PersonaPlex and Moshi (e.g. `dep_q=16` vs `dep_q=8`, 17 channels vs 9),
+> the state dict keys in training checkpoints may differ from those in the
+> base model. Verify key compatibility when loading checkpoints for inference.
+
+## Performance
+
+<table>
+<tr>
+<td width="50%">
+  <img src="./images/train_loss_curve.jpg" alt="Training loss curve" width="100%">
+  <p align="center"><em>Figure 1: Training loss curve on PersonaPlex finetune.</em></p>
+</td>
+<td width="50%">
+  <img src="./images/peak_mem_alloc.jpg" alt="Peak memory allocation" width="100%">
+  <p align="center"><em>Figure 2: Peak allocated memory during training.</em></p>
+</td>
+</tr>
+</table>
+
+## References
+
+- **PersonaPlex paper**: [arXiv:2602.06053](https://arxiv.org/abs/2602.06053) — Voice and Role Control for Full-Duplex Conversational Speech Models
+- **Moshi paper**: [arXiv:2410.00037](https://arxiv.org/abs/2410.00037) — A Speech-Text Foundation Model for Real-Time Dialogue
+- **PersonaPlex weights**: [nvidia/personaplex-7b-v1](https://huggingface.co/nvidia/personaplex-7b-v1)
+- **Moshi**: [github.com/kyutai-labs/moshi](https://github.com/kyutai-labs/moshi)
+
+## License
+
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
