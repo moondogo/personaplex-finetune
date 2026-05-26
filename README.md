@@ -345,10 +345,12 @@ For a detailed comparison between Moshi and PersonaPlex architectures, see
 
 ## References
 
-- **PersonaPlex paper**: [arXiv:2602.06053](https://arxiv.org/abs/2602.06053) — Voice and Role Control for Full-Duplex Conversational Speech Models
-- **Moshi paper**: [arXiv:2410.00037](https://arxiv.org/abs/2410.00037) — A Speech-Text Foundation Model for Real-Time Dialogue
+- **PersonaPlex**: [github.com/NVIDIA/personaplex](https://github.com/NVIDIA/personaplex)
 - **PersonaPlex weights**: [nvidia/personaplex-7b-v1](https://huggingface.co/nvidia/personaplex-7b-v1)
 - **Moshi**: [github.com/kyutai-labs/moshi](https://github.com/kyutai-labs/moshi)
+- **Moshi-Finetune**: [github.com/kyutai-labs/moshi-finetune](https://github.com/kyutai-labs/moshi-finetune)
+- **PersonaPlex paper**: [arXiv:2602.06053](https://arxiv.org/abs/2602.06053) — Voice and Role Control for Full-Duplex Conversational Speech Models
+- **Moshi paper**: [arXiv:2410.00037](https://arxiv.org/abs/2410.00037) — A Speech-Text Foundation Model for Real-Time Dialogue
 
 ## License
 
